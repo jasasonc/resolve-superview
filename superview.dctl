@@ -1,0 +1,68 @@
+// SuperView-style non-linear horizontal stretch for DaVinci Resolve.
+// https://github.com/jasasonc/resolve-superview  (GPL-3.0)
+//
+// Fills a wider frame with a narrower clip (for example 1:1 into 4:3, or 4:3 into 16:9).
+// The centre keeps its proportions and the stretch grows towards the left and right edges.
+// The curve is the one from Niek/superview (GPL-3.0): source offset = t^2 * (width difference / 2),
+// where t runs from -1 at the left edge to 1 at the right edge.
+//
+// Set up first: stretch the clip linearly so it fills the frame (Inspector > Zoom X =
+// timeline aspect / source aspect, with the zoom link off). Resolve masks the effect to the
+// clip's bounds, so the clip must fill the frame before this DCTL runs. The DCTL undoes that
+// linear stretch and applies the SuperView curve instead.
+//
+// Resampling: Catmull-Rom along x only, because rows do not move.
+
+DEFINE_UI_PARAMS(p_Source, Source aspect, DCTLUI_COMBO_BOX, 0, {SRC_1x1, SRC_4x3, SRC_3x2, SRC_CUSTOM}, {1x1, 4x3, 3x2, Custom})
+DEFINE_UI_PARAMS(p_Custom, Custom source aspect, DCTLUI_SLIDER_FLOAT, 1.0, 0.5, 2.5, 0.001)
+
+__DEVICE__ float cr(float a, float b, float c, float d, float f)
+{
+    return b + 0.5f * f * (c - a + f * (2.0f * a - 5.0f * b + 4.0f * c - d + f * (3.0f * (b - c) + d - a)));
+}
+
+__DEVICE__ int clampi(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB)
+{
+    float aspect = 1.0f;
+    if (p_Source == SRC_4x3) aspect = 4.0f / 3.0f;
+    else if (p_Source == SRC_3x2) aspect = 1.5f;
+    else if (p_Source == SRC_CUSTOM) aspect = p_Custom;
+
+    float cx = (float)p_Width * 0.5f;
+    float half_src = (float)p_Height * aspect * 0.5f;
+
+    // Source is already as wide as the frame: nothing to do.
+    if (half_src >= cx)
+    {
+        return make_float3(_tex2D(p_TexR, p_X, p_Y), _tex2D(p_TexG, p_X, p_Y), _tex2D(p_TexB, p_X, p_Y));
+    }
+
+    // Output pixel -> position in source pixels, measured from the centre.
+    float u = (float)p_X + 0.5f - cx;
+    float t = _fabs(u) / cx;
+    float off = t * t * (cx - half_src);
+    float s = u < 0.0f ? u + off : u - off;
+
+    // Source pixels -> position in the linearly stretched clip.
+    float sx = cx + s * (cx / half_src) - 0.5f;
+    float fl = _floor(sx);
+    float f = sx - fl;
+    int i = (int)fl;
+
+    int hi = p_Width - 1;
+    int x0 = clampi(i - 1, 0, hi);
+    int x1 = clampi(i, 0, hi);
+    int x2 = clampi(i + 1, 0, hi);
+    int x3 = clampi(i + 2, 0, hi);
+
+    float r = cr(_tex2D(p_TexR, x0, p_Y), _tex2D(p_TexR, x1, p_Y), _tex2D(p_TexR, x2, p_Y), _tex2D(p_TexR, x3, p_Y), f);
+    float g = cr(_tex2D(p_TexG, x0, p_Y), _tex2D(p_TexG, x1, p_Y), _tex2D(p_TexG, x2, p_Y), _tex2D(p_TexG, x3, p_Y), f);
+    float b = cr(_tex2D(p_TexB, x0, p_Y), _tex2D(p_TexB, x1, p_Y), _tex2D(p_TexB, x2, p_Y), _tex2D(p_TexB, x3, p_Y), f);
+
+    return make_float3(r, g, b);
+}
